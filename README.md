@@ -105,16 +105,26 @@ internal/obs          logging (context attrs, redaction), metrics, health/metric
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
+go test -coverpkg=./... -coverprofile=cover.out ./... && go tool cover -func=cover.out | tail -1   # 87%
 ```
 
-`httptest` and a fake clock, so retry and rate-limit tests run instantly:
-auth header, offset pagination, repeated offset, 429 with `Retry-After` (seconds and date),
-a 429 pausing other requests, 5xx retry with backoff, give up after max retries, no retry on 401,
-network errors, an HTML body, a cancelled context, limiter spacing, invalid items, per-record files,
-pruning deleted records, keeping old data when the API fails; the poller (runs immediately, repeats,
-survives errors and panics, stops on cancel, records job metrics), interval and logging flags, the
-rate-budget warning, `.env` loading; observability (context attrs on every log, secret redaction,
-readable JSON durations, metrics counters, health states, `/healthz` 200/503, token never in debug logs).
+Use `-coverpkg=./...`: without it Go only counts a package's own tests and under-reports code that
+other packages' tests exercise. No test calls the real API: everything runs against `httptest` fakes,
+a fake clock (client) or `testing/synctest` (poller), so the suite is fast and deterministic.
+
+| Area | What is tested |
+|---|---|
+| End to end (`run`) | `-once` extracts every page of users and projects into files and metrics; a failing projects job still stores users; token from env or `.env`, error without it; periodic mode runs both jobs immediately and shuts down cleanly on cancel; observability server serves `/healthz`, `/metrics`, `/debug/vars`, fails on a port in use, stops cleanly |
+| Client | auth header, offset pagination, repeated offset, 429 + `Retry-After` (seconds and date), a 429 pausing other requests, 5xx retry with backoff, give up after max retries, no retry on 401, network errors, HTML body, cancelled context, limiter spacing, invalid items, metrics, token never logged |
+| Extractor | one file per record, pruning deleted records, old data kept when the API fails, several workspaces with one failing (the others still complete), pagination through the extractor, `-workspace` skips discovery |
+| Model | decoding **real (anonymised) Asana responses** in `internal/model/testdata/`, null owner/team, unknown fields, required `gid` |
+| Storage | pretty JSON, no `.tmp` left behind, unchanged files skipped, pruning keeps metadata, unsafe names rejected |
+| Poller | exact run times on a fake clock, no pile-up, hung run cancelled by its timeout, panics and errors survived, shutdown is not a failure, no goroutine leaks, job metrics |
+| Observability | context attributes on every log, secret redaction, readable JSON durations, counters, `ok`/`failing`/`stale`/`stuck` health, `/healthz` 200/503 |
+| Config | flag defaults, interval and logging flags, every invalid flag reported at once, rate-budget warning, `.env` parsing |
+
+Not covered (low risk): `main()` itself (only `os.Exit` around `run`), disk-full/permission errors in
+storage, jitter randomness.
 
 Demo of both intervals against the real API (users every 5s, projects every 15s, Ctrl+C after ~20s):
 

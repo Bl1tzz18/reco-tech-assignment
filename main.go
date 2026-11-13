@@ -150,13 +150,23 @@ func main() {
 	}
 	slog.SetDefault(log)
 
-	if err := run(cfg, log); err != nil {
+	// Ctrl+C / SIGTERM cancel the context, which aborts in-flight requests and sleeps.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// Published here, once per process: expvar.Publish panics on a duplicate name.
+	metrics := obs.NewMetrics()
+	expvar.Publish(expvarName, metrics)
+
+	if err := run(ctx, cfg, log, metrics); err != nil {
+		stop() // os.Exit skips deferred calls
 		log.Error("extraction failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfg config, log *slog.Logger) error {
+// run wires everything together and runs until ctx is cancelled (or once).
+// It takes ctx and metrics as parameters so tests can drive and inspect it.
+func run(ctx context.Context, cfg config, log *slog.Logger, metrics *obs.Metrics) error {
 	if err := loadDotEnv(cfg.envFile, log); err != nil {
 		return fmt.Errorf("load env file: %w", err)
 	}
@@ -164,14 +174,8 @@ func run(cfg config, log *slog.Logger) error {
 	if token == "" {
 		return fmt.Errorf("%s is not set (export it or put it in %s)", tokenEnv, cfg.envFile)
 	}
-	// Ctrl+C / SIGTERM cancel the context, which aborts in-flight requests and sleeps.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	metrics := obs.NewMetrics()
-	expvar.Publish(expvarName, metrics)
 	if cfg.metricsAddr != "" {
-		stopServer, err := serveObservability(cfg.metricsAddr, metrics, log)
+		_, stopServer, err := serveObservability(cfg.metricsAddr, metrics, log)
 		if err != nil {
 			return err
 		}
@@ -241,12 +245,13 @@ func runOnce(ctx context.Context, jobs []poller.Job, log *slog.Logger) error {
 	return nil
 }
 
-// serveObservability starts the health/metrics/pprof server. Listening
-// happens synchronously, so a bad address or a port in use fails startup.
-func serveObservability(addr string, m *obs.Metrics, log *slog.Logger) (stop func(), err error) {
+// serveObservability starts the health/metrics/pprof server and returns the
+// address it listens on (useful with port 0). Listening happens synchronously,
+// so a bad address or a port in use fails startup.
+func serveObservability(addr string, m *obs.Metrics, log *slog.Logger) (bound string, stop func(), err error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("listen on -metrics-addr %s: %w", addr, err)
+		return "", nil, fmt.Errorf("listen on -metrics-addr %s: %w", addr, err)
 	}
 	srv := &http.Server{Handler: obs.Handler(m), ReadHeaderTimeout: readHeaderTimeout}
 	go func() {
@@ -255,7 +260,7 @@ func serveObservability(addr string, m *obs.Metrics, log *slog.Logger) (stop fun
 		}
 	}()
 	log.Info("observability server listening", "addr", ln.Addr().String())
-	return func() {
+	return ln.Addr().String(), func() {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {

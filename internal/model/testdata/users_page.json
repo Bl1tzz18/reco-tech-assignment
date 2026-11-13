@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "gid": "1000000000000001",
+      "email": "user1@example.com",
+      "name": "User 1"
+    },
+    {
+      "gid": "1000000000000002",
+      "email": "user2@example.com",
+      "name": "User 2"
+    },
+    {
+      "gid": "1000000000000003",
+      "email": "user3@example.com",
+      "name": "User 3"
+    },
+    {
+      "gid": "1000000000000004",
+      "email": "user4@example.com",
+      "name": "User 4"
+    },
+    {
+      "gid": "1000000000000005",
+      "email": "user5@example.com",
+      "name": "User 5"
+    }
+  ],
+  "next_page": null
+}
