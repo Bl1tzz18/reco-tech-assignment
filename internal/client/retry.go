@@ -33,7 +33,8 @@ func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 			return nil, fmt.Errorf("giving up after %d attempts: %w", attempt+1, err)
 		}
 		wait, ownSleep := c.retryDelay(err, attempt)
-		c.log.Warn("request failed, retrying", "url", rawURL, "attempt", attempt+1, "wait", wait, "err", err)
+		c.metrics.ObserveRetry()
+		c.log.WarnContext(ctx, "request failed, retrying", "url", rawURL, "attempt", attempt+1, "wait", wait, "err", err)
 		if !ownSleep {
 			continue // 429: doOnce already paused the shared limiter; the next attempt waits there
 		}

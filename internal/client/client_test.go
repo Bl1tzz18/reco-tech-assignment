@@ -1,18 +1,24 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"reco-tech-assignment/internal/obs"
 )
 
 const testToken = "test-token"
@@ -49,7 +55,9 @@ func newTestClient(t *testing.T, baseURL string, opts Options) (*Client, *fakeCl
 	clock := &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	opts.PageSize = max(opts.PageSize, 10)
 	opts.BaseBackoff = time.Second
-	opts.Logger = slog.New(slog.DiscardHandler)
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
 	opts.Sleep = clock.Sleep
 	opts.Now = clock.Now
 	opts.Jitter = func(d time.Duration) time.Duration { return d }
@@ -362,5 +370,67 @@ func TestParseRetryAfter(t *testing.T) {
 		if got := parseRetryAfter(tt.in, now); got != tt.want {
 			t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestTokenNeverLogged(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError) // exercise the retry WARN log too
+			return
+		}
+		writeJSON(w, `{"data":[{"gid":"1"}],"next_page":null}`)
+	}))
+	defer srv.Close()
+	var buf bytes.Buffer
+	log, err := obs.NewLogger(&buf, "text", "debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := newTestClient(t, srv.URL, Options{MaxRetries: 1, Logger: log})
+
+	if _, err := c.FetchAll(t.Context(), "/users", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "http request") {
+		t.Fatalf("expected debug request logs, got: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), testToken) {
+		t.Errorf("token leaked into logs: %s", buf.String())
+	}
+}
+
+func TestMetricsRecordRequestsRetriesAnd429(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusInternalServerError)
+		case 2:
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			writeJSON(w, `{"data":[],"next_page":null}`)
+		}
+	}))
+	defer srv.Close()
+	m := obs.NewMetrics()
+	c, _ := newTestClient(t, srv.URL, Options{MaxRetries: 3, Metrics: m})
+
+	if _, err := c.FetchAll(t.Context(), "/users", nil); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ByStatus    map[string]int `json:"http_requests_by_status"`
+		Retries     int            `json:"http_retries_total"`
+		RateLimited int            `json:"http_rate_limited_total"`
+	}
+	if err := json.Unmarshal([]byte(m.String()), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"500": 1, "429": 1, "200": 1}
+	if !maps.Equal(got.ByStatus, want) || got.Retries != 2 || got.RateLimited != 1 {
+		t.Errorf("metrics = %+v, want by_status %v, 2 retries, 1 rate limited", got, want)
 	}
 }

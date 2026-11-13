@@ -14,6 +14,7 @@ import (
 
 	"reco-tech-assignment/internal/client"
 	"reco-tech-assignment/internal/model"
+	"reco-tech-assignment/internal/obs"
 	"reco-tech-assignment/internal/storage"
 )
 
@@ -60,7 +61,7 @@ func newTestExtractor(t *testing.T, api http.Handler) (*Extractor, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(c, store, "", log), dir
+	return New(c, store, "", log, obs.NewMetrics()), dir
 }
 
 func readJSON[T any](t *testing.T, path string) T {
@@ -85,10 +86,15 @@ func TestSyncWritesOneFilePerRecord(t *testing.T) {
 	}
 	ex, dir := newTestExtractor(t, api)
 
-	if err := ex.SyncUsers(t.Context()); err != nil {
+	res, err := ex.SyncUsers(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ex.SyncProjects(t.Context()); err != nil {
+	// 1 request for /workspaces + 1 page of users.
+	if res != (Result{Items: 2, Requests: 2}) {
+		t.Errorf("users result = %+v, want 2 items in 2 requests", res)
+	}
+	if _, err := ex.SyncProjects(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,13 +116,13 @@ func TestSyncPrunesDeletedAndKeepsDataOnFailure(t *testing.T) {
 	api := &fakeAsana{users: `{"gid":"1","name":"Ann"}`, projects: `{"gid":"10","name":"A"},{"gid":"11","name":"B"}`}
 	ex, dir := newTestExtractor(t, api)
 	projectsDir := filepath.Join(dir, "100", "projects")
-	if err := ex.SyncProjects(t.Context()); err != nil {
+	if _, err := ex.SyncProjects(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	// Project 11 is deleted in Asana: its file must go.
 	api.projects = `{"gid":"10","name":"A"}`
-	if err := ex.SyncProjects(t.Context()); err != nil {
+	if _, err := ex.SyncProjects(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if got := files(t, projectsDir); !slices.Equal(got, []string{"10.json", "_meta.json"}) {
@@ -125,7 +131,7 @@ func TestSyncPrunesDeletedAndKeepsDataOnFailure(t *testing.T) {
 
 	// The API fails: the sync errors and the previous files stay intact.
 	api.failProjects.Store(true)
-	if err := ex.SyncProjects(t.Context()); err == nil {
+	if _, err := ex.SyncProjects(t.Context()); err == nil {
 		t.Fatal("expected an error when /projects fails")
 	}
 	if got := files(t, projectsDir); !slices.Equal(got, []string{"10.json", "_meta.json"}) {

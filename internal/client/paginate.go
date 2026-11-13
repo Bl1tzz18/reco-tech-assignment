@@ -34,7 +34,7 @@ func (c *Client) FetchAll(ctx context.Context, path string, params url.Values) (
 			return nil, fmt.Errorf("decode %s page %d: %w", path, pageNum, err)
 		}
 		all = append(all, p.Data...)
-		c.log.Debug("fetched page", "path", path, "page", pageNum, "items", len(p.Data))
+		c.log.DebugContext(ctx, "fetched page", "path", path, "page", pageNum, "items", len(p.Data))
 
 		if p.NextPage == nil || p.NextPage.Offset == "" {
 			return all, nil
@@ -92,7 +92,7 @@ func FetchAllAs[T any](ctx context.Context, c *Client, path string, params url.V
 		if len(out) == 0 {
 			return nil, fmt.Errorf("fetch %s: all %d items are invalid", path, invalid)
 		}
-		c.log.Warn("skipped invalid items", "path", path, "invalid", invalid, "valid", len(out))
+		c.log.WarnContext(ctx, "skipped invalid items", "path", path, "invalid", invalid, "valid", len(out))
 	}
 	return out, nil
 }

@@ -31,7 +31,8 @@ func newLimiter(rpm, burst int, now func() time.Time, sleep func(context.Context
 
 // wait reserves a token under the lock, then sleeps WITHOUT holding it, so
 // concurrent callers queue up fairly instead of blocking each other.
-func (l *limiter) wait(ctx context.Context) error {
+// It returns how long the caller had to wait (for metrics).
+func (l *limiter) wait(ctx context.Context) (time.Duration, error) {
 	l.mu.Lock()
 	now := l.now()
 	var delay time.Duration
@@ -49,9 +50,9 @@ func (l *limiter) wait(ctx context.Context) error {
 	l.mu.Unlock()
 
 	if delay <= 0 {
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
-	return l.sleep(ctx, delay)
+	return delay, l.sleep(ctx, delay)
 }
 
 // pause stops all requests for d. It never shortens an existing pause.

@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"reco-tech-assignment/internal/obs"
 )
 
 const (
@@ -33,6 +35,7 @@ type Options struct {
 	Timeout           time.Duration
 	BaseBackoff       time.Duration
 	Logger            *slog.Logger
+	Metrics           *obs.Metrics // nil = no metrics
 
 	// Test hooks; nil = real implementations.
 	Sleep  func(ctx context.Context, d time.Duration) error
@@ -51,6 +54,7 @@ type Client struct {
 	pageSize    int
 	baseBackoff time.Duration
 	log         *slog.Logger
+	metrics     *obs.Metrics
 	sleep       func(ctx context.Context, d time.Duration) error
 	now         func() time.Time
 	jitter      func(d time.Duration) time.Duration
@@ -98,11 +102,15 @@ func New(baseURL, token string, opts Options) (*Client, error) {
 		pageSize:    opts.PageSize,
 		baseBackoff: opts.BaseBackoff,
 		log:         opts.Logger,
+		metrics:     opts.Metrics,
 		sleep:       opts.Sleep,
 		now:         opts.Now,
 		jitter:      opts.Jitter,
 	}, nil
 }
+
+// PageSize is the number of items requested per page.
+func (c *Client) PageSize() int { return c.pageSize }
 
 // StatusError is returned for any non-2xx response.
 type StatusError struct {
@@ -127,7 +135,12 @@ func (e *StatusError) Error() string {
 
 // doOnce performs a single GET: wait for the limiter, send, read, classify.
 func (c *Client) doOnce(ctx context.Context, rawURL string) ([]byte, error) {
-	if err := c.limiter.wait(ctx); err != nil {
+	waited, err := c.limiter.wait(ctx)
+	c.metrics.ObserveLimiterWait(waited)
+	if waited > 0 {
+		c.log.DebugContext(ctx, "rate limiter wait", "wait", waited)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -137,13 +150,20 @@ func (c *Client) doOnce(ctx context.Context, rawURL string) ([]byte, error) {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
 
+	start := c.now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		c.metrics.ObserveRequest(0, c.now().Sub(start))
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	took := c.now().Sub(start)
+	c.metrics.ObserveRequest(resp.StatusCode, took)
+	// Path only: no headers (Authorization) and no query noise.
+	c.log.DebugContext(ctx, "http request", "method", req.Method, "path", req.URL.Path,
+		"status", resp.StatusCode, "bytes", len(body), "took", took)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -153,8 +173,12 @@ func (c *Client) doOnce(ctx context.Context, rawURL string) ([]byte, error) {
 			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), c.now()),
 			Body:       snippet(body),
 		}
-		if resp.StatusCode == http.StatusTooManyRequests && se.RetryAfter > 0 {
-			c.limiter.pause(se.RetryAfter) // the limit is per token: every goroutine backs off
+		if resp.StatusCode == http.StatusTooManyRequests {
+			c.metrics.ObserveRateLimited()
+			c.log.WarnContext(ctx, "rate limited by the API", "path", req.URL.Path, "retry_after", se.RetryAfter)
+			if se.RetryAfter > 0 {
+				c.limiter.pause(se.RetryAfter) // the limit is per token: every goroutine backs off
+			}
 		}
 		return nil, se
 	}
