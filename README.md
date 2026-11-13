@@ -1,5 +1,7 @@
 # Asana extractor
 
+[![CI](https://github.com/Bl1tzz18/reco-tech-assignment/actions/workflows/ci.yml/badge.svg)](https://github.com/Bl1tzz18/reco-tech-assignment/actions/workflows/ci.yml)
+
 Extracts **users** and **projects** from the [Asana REST API](https://developers.asana.com/docs)
 and stores **each record in its own JSON file**, once or periodically (every 5 minutes or every
 30 seconds). Go standard library only.
@@ -115,7 +117,7 @@ internal/obs          logging (context attrs, redaction), metrics, health/metric
 ## Test
 
 ```sh
-make check   # gofmt + go vet + go test -race ./...
+make check   # gofmt + go vet + go test -race ./...   (CI also runs golangci-lint and govulncheck)
 make cover   # go test -coverpkg=./... ... -> 87%
 ```
 

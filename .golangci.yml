@@ -1,0 +1,24 @@
+version: "2"
+
+linters:
+  # Default set (errcheck, govet, ineffassign, staticcheck, unused) plus a few
+  # that catch real bugs in HTTP/IO code.
+  enable:
+    - bodyclose     # every resp.Body is closed
+    - errorlint     # errors compared with errors.Is/As, wrapped with %w
+    - gosec         # security: file permissions, path handling, ...
+    - misspell
+    - unconvert
+  settings:
+    gosec:
+      excludes:
+        - G301 # mkdir 0755 / G302 chmod 0644: the output is meant to be read by other tools
+        - G302
+        - G304 # file paths come from flags (.env, data dir) or are validated (storage.path)
+        - G404 # math/rand for retry jitter: not a security use
+  exclusions:
+    presets:
+      - std-error-handling # unchecked Close/Remove/Setenv/print in defers and tests
+    rules:
+      - path: _test\.go
+        linters: [gosec] # tests write temp files and use fixed tokens on purpose
