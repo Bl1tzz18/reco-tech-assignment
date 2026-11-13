@@ -4,6 +4,17 @@ Extracts **users** and **projects** from the [Asana REST API](https://developers
 and stores **each record in its own JSON file**, once or periodically (every 5 minutes or every
 30 seconds). Go standard library only.
 
+## Quick start
+
+```sh
+cp .env.example .env && chmod 600 .env   # put your Asana personal access token in .env
+make once                                 # extract once -> data/<workspace>/{users,projects}/<gid>.json
+make run                                  # extract every 5 minutes until Ctrl+C
+make check                                # gofmt + vet + tests (race detector)
+```
+
+Requires Go 1.25+. `make` lists every target.
+
 ## Run
 
 ```sh
@@ -104,8 +115,8 @@ internal/obs          logging (context attrs, redaction), metrics, health/metric
 ## Test
 
 ```sh
-gofmt -l . && go vet ./... && go test -race ./...
-go test -coverpkg=./... -coverprofile=cover.out ./... && go tool cover -func=cover.out | tail -1   # 87%
+make check   # gofmt + go vet + go test -race ./...
+make cover   # go test -coverpkg=./... ... -> 87%
 ```
 
 Use `-coverpkg=./...`: without it Go only counts a package's own tests and under-reports code that
@@ -139,7 +150,7 @@ the context by the poller and added automatically by the handler, so you can fil
 (poller → extractor → HTTP client):
 
 ```json
-{"level":"INFO","msg":"sync ok","resource":"users","workspace":"1220513976968885","items":5,"written":0,"unchanged":5,"removed":0,"took":"739ms","job":"users","run":2}
+{"level":"INFO","msg":"sync ok","resource":"users","workspace":"1200000000000001","items":5,"written":0,"unchanged":5,"removed":0,"took":"739ms","job":"users","run":2}
 ```
 
 | Level | What |
