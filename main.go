@@ -37,7 +37,8 @@ const (
 	defaultDataDir    = "data"
 	defaultEnvFile    = ".env"
 	defaultInterval   = 5 * time.Minute
-	minInterval       = 5 * time.Second // a typo like -interval 1ms must not burn the rate budget
+	defaultRunTimeout = 10 * time.Minute // generous: a full sync of ~10k records at 150 rpm takes < 1m
+	minInterval       = 5 * time.Second  // a typo like -interval 1ms must not burn the rate budget
 	shutdownTimeout   = 5 * time.Second
 	readHeaderTimeout = 5 * time.Second
 	expvarName        = "asana_extractor"
@@ -55,6 +56,7 @@ type config struct {
 	interval         time.Duration
 	usersInterval    time.Duration // 0 = interval
 	projectsInterval time.Duration // 0 = interval
+	runTimeout       time.Duration
 	once             bool
 	logFormat        string
 	logLevel         string
@@ -75,6 +77,7 @@ func parseFlags(args []string) (config, error) {
 	fs.DurationVar(&cfg.interval, "interval", defaultInterval, "extraction interval for all resources (e.g. 5m or 30s)")
 	fs.DurationVar(&cfg.usersInterval, "users-interval", 0, "override -interval for users")
 	fs.DurationVar(&cfg.projectsInterval, "projects-interval", 0, "override -interval for projects")
+	fs.DurationVar(&cfg.runTimeout, "run-timeout", defaultRunTimeout, "max duration of one sync run; a run past it is cancelled and counted as failed")
 	fs.BoolVar(&cfg.once, "once", false, "extract once and exit")
 	fs.StringVar(&cfg.logFormat, "log-format", "text", "log format: text or json")
 	fs.StringVar(&cfg.logLevel, "log-level", "info", "log level: debug, info, warn or error")
@@ -108,6 +111,9 @@ func (c config) validate() error {
 	}
 	if c.timeout <= 0 {
 		errs = append(errs, fmt.Errorf("-timeout must be > 0, got %s", c.timeout))
+	}
+	if c.runTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("-run-timeout must be > 0, got %s", c.runTimeout))
 	}
 	if c.logFormat != "text" && c.logFormat != "json" {
 		errs = append(errs, fmt.Errorf("-log-format must be text or json, got %q", c.logFormat))
@@ -193,15 +199,17 @@ func run(cfg config, log *slog.Logger) error {
 	ex := extractor.New(api, store, cfg.workspace, log, metrics)
 	budget := newRateBudget(cfg.rpm, log)
 	jobs := []poller.Job{
-		{Name: "users", Interval: cfg.usersInterval, Sync: budget.track("users", cfg.usersInterval, ex.SyncUsers)},
-		{Name: "projects", Interval: cfg.projectsInterval, Sync: budget.track("projects", cfg.projectsInterval, ex.SyncProjects)},
+		{Name: "users", Interval: cfg.usersInterval, Timeout: cfg.runTimeout,
+			Sync: budget.track("users", cfg.usersInterval, ex.SyncUsers)},
+		{Name: "projects", Interval: cfg.projectsInterval, Timeout: cfg.runTimeout,
+			Sync: budget.track("projects", cfg.projectsInterval, ex.SyncProjects)},
 	}
 
 	// Never log the token.
 	log.Info("starting", "mode", mode(cfg.once), "version", version(), "base_url", cfg.baseURL,
 		"workspace", cfg.workspace, "data_dir", cfg.dataDir, "rpm", cfg.rpm,
 		"users_interval", cfg.usersInterval, "projects_interval", cfg.projectsInterval,
-		"metrics_addr", cfg.metricsAddr)
+		"run_timeout", cfg.runTimeout, "metrics_addr", cfg.metricsAddr)
 
 	if cfg.once {
 		return runOnce(ctx, jobs, log)

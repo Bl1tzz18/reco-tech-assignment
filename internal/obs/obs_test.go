@@ -94,7 +94,9 @@ func TestNilMetricsIsNoop(t *testing.T) {
 	var m *Metrics
 	m.ObserveRequest(200, time.Second)
 	m.ObserveRetry()
-	m.RegisterJob("x", time.Minute)
+	m.RegisterJob("x", time.Minute, 0)
+	m.ObserveJobStart("x")
+	m.ObserveJobAborted("x")
 	m.ObserveJobRun("x", time.Second, nil)
 	m.ObserveSync(SyncStats{})
 }
@@ -103,7 +105,7 @@ func TestHealth(t *testing.T) {
 	m := NewMetrics()
 	now := m.startedAt
 	m.now = func() time.Time { return now }
-	m.RegisterJob("users", time.Minute)
+	m.RegisterJob("users", time.Minute, 0)
 
 	if _, healthy := m.Health(); !healthy {
 		t.Error("a job that just started must be healthy")
@@ -122,9 +124,42 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthDetectsStuckRun(t *testing.T) {
+	m := NewMetrics()
+	now := m.startedAt
+	m.now = func() time.Time { return now }
+	m.RegisterJob("users", time.Hour, 10*time.Second)
+
+	m.ObserveJobStart("users")
+	now = now.Add(5 * time.Second)
+	if st, healthy := m.Health(); !healthy || st["users"] != "ok" {
+		t.Errorf("run within timeout: status=%v healthy=%v", st, healthy)
+	}
+	if m.Jobs()["users"].RunningSince.IsZero() {
+		t.Error("running_since must be set while a run is in progress")
+	}
+	now = now.Add(10 * time.Second)
+	if st, healthy := m.Health(); healthy || st["users"] != "stuck" {
+		t.Errorf("run past its timeout: status=%v healthy=%v, want stuck", st, healthy)
+	}
+	m.ObserveJobRun("users", 15*time.Second, nil)
+	if st, _ := m.Health(); st["users"] != "ok" || !m.Jobs()["users"].RunningSince.IsZero() {
+		t.Errorf("after the run ended: status=%v, running_since must be cleared", st)
+	}
+}
+
+func TestMetricsExposeGoroutines(t *testing.T) {
+	var got struct {
+		Goroutines int `json:"goroutines"`
+	}
+	if err := json.Unmarshal([]byte(NewMetrics().String()), &got); err != nil || got.Goroutines < 1 {
+		t.Errorf("goroutines = %d, err = %v", got.Goroutines, err)
+	}
+}
+
 func TestHealthzEndpoint(t *testing.T) {
 	m := NewMetrics()
-	m.RegisterJob("users", time.Minute)
+	m.RegisterJob("users", time.Minute, 0)
 	srv := httptest.NewServer(Handler(m))
 	defer srv.Close()
 

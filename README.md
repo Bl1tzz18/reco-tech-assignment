@@ -25,6 +25,7 @@ go run . -log-format json -metrics-addr 127.0.0.1:9090   # production-style: JSO
 | `-interval` | `5m` | Extraction interval for all resources (min `5s`) |
 | `-users-interval` | `-interval` | Override for users |
 | `-projects-interval` | `-interval` | Override for projects |
+| `-run-timeout` | `10m` | Max duration of one sync run; past it the run is cancelled and counted as failed |
 | `-once` | `false` | Extract once and exit |
 | `-workspace` | (all) | Only extract this workspace gid |
 | `-data-dir` | `data` | Output directory |
@@ -145,8 +146,8 @@ Secrets: the token is never logged. As a safety net, attributes named `token`, `
 
 | Endpoint | Content |
 |---|---|
-| `GET /healthz` | `200 {"status":"ok","jobs":{"users":"ok","projects":"failing"}}`; **503** when a job has not succeeded for 3 intervals (liveness/readiness probe) |
-| `GET /metrics` | `http_requests_by_status`, `http_retries_total`, `http_rate_limited_total`, `http_request_ms_total`, `rate_limiter_wait_ms_total`, per job (`runs`, `failures`, `consecutive_failures`, `last_success`, `last_duration_ms`, `last_error`), per workspace/resource (`items`, `written`, `unchanged`, `removed`, `fetched_at`), `uptime_s` |
+| `GET /healthz` | `200 {"status":"ok","jobs":{"users":"ok","projects":"failing"}}`; **503** when a job is `stuck` (a run is in progress past `-run-timeout`) or `stale` (no success for 3 intervals). Use it as the liveness probe |
+| `GET /metrics` | `http_requests_by_status`, `http_retries_total`, `http_rate_limited_total`, `http_request_ms_total`, `rate_limiter_wait_ms_total`, `goroutines`, per job (`runs`, `failures`, `consecutive_failures`, `running_since`, `last_success`, `last_duration_ms`, `last_error`), per workspace/resource (`items`, `written`, `unchanged`, `removed`, `fetched_at`), `uptime_s` |
 | `GET /debug/vars` | the same + Go runtime `memstats` |
 | `GET /debug/pprof/` | CPU / heap / goroutine profiles |
 
@@ -156,6 +157,26 @@ On exit the headline counters are also logged (`metrics summary`), so even `-onc
 Useful signals: `rate_limiter_wait_ms_total` growing fast = the intervals are too aggressive for `-rpm`;
 any `429` = the limiter is set above the real limit (or another client shares the token);
 `consecutive_failures >= 3` or `/healthz` 503 = page someone.
+
+## Keeping the goroutines healthy
+
+There are three long-lived goroutines: one per job (users, projects) and the observability server.
+
+| Risk | Guard |
+|---|---|
+| A job panics | `RunOnce` recovers it into an error; the job and the other job keep running |
+| A run hangs | every run gets `context.WithTimeout(-run-timeout)`; every wait (HTTP 10s timeout, limiter, retry backoff, `Retry-After` capped at 5m) is bounded and ctx-aware |
+| A goroutine is stuck anyway | `/healthz` reports `stuck` (run in progress past the timeout) → 503 |
+| A job silently stops or keeps failing | `/healthz` reports `stale` after 3 intervals without success → 503; WARN → ERROR after 3 consecutive failures |
+| Slow runs pile up | `time.Ticker` drops missed ticks: runs are back to back, never concurrent |
+| Data races | shared state is behind a mutex (limiter, metrics) or atomic (`expvar`); the jobs write to different dirs; `go test -race` |
+| Goroutine leaks | `goroutines` gauge in `/metrics`; poller tests run in `testing/synctest` bubbles, which fail if a goroutine is left behind |
+| Shutdown | Ctrl+C/SIGTERM cancels the context, and a pending tick can never start a new run after that; `wg.Wait()` waits for both jobs |
+| Truly unexpected crash | let the process die and be restarted by its supervisor (systemd `Restart=always`, Kubernetes `livenessProbe: httpGet /healthz`); self-healing inside the process is less reliable than a restart |
+
+The timing tests use `testing/synctest` (fake clock): runs start at exactly 0s, 30s, 60s, 90s; 45s runs on a
+30s interval start at 0s, 45s, 90s (no pile-up); a hung run is cancelled at its timeout and the next run
+still starts on time; shutdown during a run is not counted as a failure.
 
 ## Scale: thousands of projects and employees
 

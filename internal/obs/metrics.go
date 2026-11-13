@@ -3,6 +3,7 @@ package obs
 import (
 	"expvar"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -36,6 +37,8 @@ type Metrics struct {
 // JobStats is the state of one periodic job.
 type JobStats struct {
 	Interval            string    `json:"interval"`
+	Timeout             string    `json:"timeout,omitempty"`
+	RunningSince        time.Time `json:"running_since,omitzero"` // set while a run is in progress
 	Runs                int64     `json:"runs"`
 	Failures            int64     `json:"failures"`
 	ConsecutiveFailures int64     `json:"consecutive_failures"`
@@ -43,6 +46,7 @@ type JobStats struct {
 	LastSuccess         time.Time `json:"last_success,omitzero"`
 	LastError           string    `json:"last_error,omitempty"`
 	interval            time.Duration
+	timeout             time.Duration
 }
 
 // SyncStats is the result of the last successful sync of one resource in one workspace.
@@ -76,6 +80,8 @@ func NewMetrics() *Metrics {
 	m.root.Set("http_rate_limited_total", m.rateLimited)
 	m.root.Set("http_request_ms_total", m.requestMs)
 	m.root.Set("rate_limiter_wait_ms_total", m.limiterWaitMs)
+	// A goroutine count that keeps growing is a leak.
+	m.root.Set("goroutines", expvar.Func(func() any { return runtime.NumGoroutine() }))
 	m.root.Set("uptime_s", expvar.Func(func() any { return int64(m.now().Sub(m.startedAt).Seconds()) }))
 	m.root.Set("jobs", expvar.Func(func() any { return m.Jobs() }))
 	m.root.Set("syncs", expvar.Func(func() any { return m.Syncs() }))
@@ -139,14 +145,44 @@ func (m *Metrics) ObserveLimiterWait(d time.Duration) {
 	}
 }
 
-// RegisterJob declares a periodic job, so /healthz can check it even before its first run.
-func (m *Metrics) RegisterJob(name string, interval time.Duration) {
+// RegisterJob declares a periodic job, so /healthz can check it even before
+// its first run. timeout 0 = runs have no time limit (never reported stuck).
+func (m *Metrics) RegisterJob(name string, interval, timeout time.Duration) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.jobs[name] = &JobStats{Interval: interval.String(), interval: interval}
+	j := &JobStats{Interval: interval.String(), interval: interval, timeout: timeout}
+	if timeout > 0 {
+		j.Timeout = timeout.String()
+	}
+	m.jobs[name] = j
+}
+
+// ObserveJobStart marks a run of a registered job as in progress.
+func (m *Metrics) ObserveJobStart(name string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if j, ok := m.jobs[name]; ok {
+		j.RunningSince = m.now().UTC()
+	}
+}
+
+// ObserveJobAborted marks a run that was cancelled by shutdown: no longer
+// in progress, but neither a success nor a failure.
+func (m *Metrics) ObserveJobAborted(name string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if j, ok := m.jobs[name]; ok {
+		j.RunningSince = time.Time{}
+	}
 }
 
 // ObserveJobRun records the outcome of one run of a registered job.
@@ -162,6 +198,7 @@ func (m *Metrics) ObserveJobRun(name string, took time.Duration, err error) {
 		m.jobs[name] = j
 	}
 	j.Runs++
+	j.RunningSince = time.Time{}
 	j.LastDurationMs = took.Milliseconds()
 	if err != nil {
 		j.Failures++
@@ -206,10 +243,16 @@ func (m *Metrics) Syncs() map[string]SyncStats {
 	return out
 }
 
-// Health reports each registered job as "ok", "failing" (recent failures,
-// still within its window) or "stale" (no success for staleAfterIntervals
-// intervals; counted from process start before the first success).
-// healthy is false when any job is stale.
+// Health reports each registered job as:
+//
+//	"stuck"   a run has been in progress longer than its timeout (it should
+//	          have been cancelled: a goroutine is blocked somewhere)
+//	"stale"   no success for staleAfterIntervals intervals (counted from
+//	          process start before the first success)
+//	"failing" recent failures, still within its window
+//	"ok"
+//
+// healthy is false when any job is stuck or stale.
 func (m *Metrics) Health() (status map[string]string, healthy bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -222,6 +265,9 @@ func (m *Metrics) Health() (status map[string]string, healthy bool) {
 			since = m.startedAt
 		}
 		switch {
+		case j.timeout > 0 && !j.RunningSince.IsZero() && now.Sub(j.RunningSince) > j.timeout:
+			status[name] = "stuck"
+			healthy = false
 		case j.interval > 0 && now.Sub(since) > staleAfterIntervals*j.interval:
 			status[name] = "stale"
 			healthy = false
